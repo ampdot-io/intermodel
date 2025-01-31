@@ -3,7 +3,7 @@ name = "intermodel"
 version = "0.0.67"
 dependencies = [
     "httpx",
-    "anthropic",
+    "anthropic>=0.3.1",
     "tiktoken",
     "python-dotenv",
     "replicate",
