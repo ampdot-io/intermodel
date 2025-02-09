@@ -659,8 +659,8 @@ def max_token_length_inner(model):
         except Exception as e:
             raise NotImplementedError(
                 f"Unable to download {model} from HuggingFace. "
-                f"Are you logged into HuggingFace (`huggingface-cli login`) and have you agreed to the model license at"
-                f"`https://huggingface.co/{model}`?"
+                f"Are you logged into HuggingFace (`rye run huggingface-cli login`) and have you agreed to the model"
+                f"license at `https://huggingface.co/{model}`?"
             )
 
 
