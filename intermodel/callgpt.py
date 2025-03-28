@@ -33,7 +33,9 @@ session: Optional[aiohttp.ClientSession] = None
 
 @tenacity.retry(
     retry=tenacity.retry_if_exception(
-        lambda e: isinstance(e, aiohttp.ClientResponseError) and e.status in (429,)
+        lambda e: isinstance(e, aiohttp.ClientResponseError)
+        and e.status in (429,)
+        or isinstance(e, ValueError)
     ),
     wait=tenacity.wait_random_exponential(min=1, max=60),
     stop=tenacity.stop_after_attempt(6),
@@ -57,6 +59,10 @@ async def complete(
     vendor_config=None,
     **kwargs,
 ):
+    message_history_format = kwargs.get("message_history_format", None)
+    messages = kwargs.get("messages", None)
+    name = kwargs.get("name", None)
+    kwargs = kwargs.get("continuation_options", {})
     tokenize_as = parse_model_string(MODEL_ALIASES.get(model, model)).tokenize_as
     model = parse_model_string(MODEL_ALIASES.get(model, model)).model
     # todo: multiple completions, top k, logit bias for all vendors
@@ -77,6 +83,8 @@ async def complete(
             hash_object.update(str(user_id).encode("utf-8"))
             hashed_user_id = hash_object.hexdigest()
 
+        reasoning_content_key = None
+
         if "openai_api_key" not in kwargs:
             kwargs["openai_api_key"] = os.getenv("OPENAI_API_KEY")
         rest = dict(kwargs)
@@ -92,9 +100,6 @@ async def complete(
             "model": model,
             "prompt": "<|endoftext|>" if prompt is None else prompt,
             "temperature": temperature,
-            (
-                "max_completion_tokens" if model.startswith("o1") else "max_tokens"
-            ): max_tokens,
             "top_p": top_p,
             "frequency_penalty": frequency_penalty,
             "presence_penalty": presence_penalty,
@@ -104,30 +109,68 @@ async def complete(
             "n": num_completions,
             **rest,
         }
+        if not model.startswith("o1"):
+            api_arguments["max_tokens"] = max_tokens
         # remove None values, OpenAI API doesn't like them
         for key, value in dict(api_arguments).items():
             if value is None:
                 del api_arguments[key]
         if (
-            model.startswith("gpt-3.5")
+            message_history_format is not None
+            and message_history_format.name == "chat"
+            or model.startswith("gpt-3.5")
             or model.startswith("gpt-4")
             or model.startswith("o1")
             or model.startswith("openpipe:")
             or model.startswith("gpt4")
+            or model.startswith("deepseek-reasoner")
+            or model.startswith("deepseek/deepseek-r1")
         ) and not model.endswith("-base"):
-            api_arguments["messages"] = format_messages(api_arguments["prompt"], "user")
+            if messages is None:
+                if (
+                    message_history_format is not None
+                    and message_history_format.name == "chat"
+                ):
+                    api_arguments["messages"] = message_history_format.format_messages(
+                        api_arguments["prompt"], "user"
+                    )
+                else:
+                    api_arguments["messages"] = [
+                        {
+                            "role": "system",
+                            "content": f"Respond to the chat, where your username is shown as {name}. Only respond with the content of your message, without including your username.",
+                        },
+                        {"role": "user", "content": api_arguments["prompt"]},
+                    ]
+            else:
+                api_arguments["messages"] = messages
             if "prompt" in api_arguments:
                 del api_arguments["prompt"]
             if "logprobs" in api_arguments:
                 del api_arguments["logprobs"]
+            if model.startswith("o1") or model.startswith("deepseek"):
+                if "logit_bias" in api_arguments:
+                    del api_arguments["logit_bias"]
+                if (
+                    model.startswith("o1")
+                    or model.startswith("deepseek-reasoner")
+                    or model.startswith("deepseek/deepseek-r1")
+                ):
+                    if api_base.startswith("https://openrouter.ai"):
+                        reasoning_content_key = "reasoning"
+                        api_arguments["include_reasoning"] = True
+                    else:
+                        reasoning_content_key = "reasoning_content"
             api_suffix = "/chat/completions"
         else:
             api_suffix = "/completions"
+
         async with session.post(
             api_base + api_suffix, headers=headers, json=api_arguments
         ) as response:
             response.raise_for_status()
             api_response = await response.json()
+
         try:
             return {
                 "prompt": {"text": prompt if prompt is not None else "<|endoftext|>"},
@@ -141,6 +184,11 @@ async def complete(
                         "finish_reason": {
                             "reason": completion.get("finish_reason", "unknown")
                         },
+                        "reasoning_content": (
+                            completion["message"].get(reasoning_content_key, None)
+                            if reasoning_content_key is not None
+                            else None
+                        ),
                     }
                     for completion in api_response["choices"]
                 ],
@@ -271,12 +319,12 @@ async def complete(
             # forefront bills both the prompt and completion
             "usage": NotImplemented,
         }
-    elif vendor == "anthropic":
+    elif vendor.startswith("anthropic"):
         import anthropic
 
         if num_completions not in [None, 1]:
             raise NotImplementedError("Anthropic only supports num_completions=1")
-        client = anthropic.Client(
+        client = anthropic.AsyncAnthropic(
             api_key=kwargs.get("anthropic_api_key", os.getenv("ANTHROPIC_API_KEY"))
         )
         if "anthropic_api_key" in kwargs:
@@ -286,20 +334,51 @@ async def complete(
         for key, value in dict(kwargs).items():
             if value is None:
                 del kwargs[key]
-        response = await client.acompletion(
+
+        if messages is None:
+            if (
+                message_history_format is not None
+                and message_history_format.name == "chat"
+            ):
+                messages = [
+                    {
+                        "role": message["role"],
+                        "content": process_image_message(message["content"]),
+                    }
+                    for message in message_history_format.format_messages(
+                        prompt, "user"
+                    )
+                ]
+            else:
+                if kwargs.get("system", None) is None:
+                    kwargs["system"] = (
+                        "The assistant is in CLI simulation mode, and responds to the user's CLI commands only with the output of the command."
+                    )
+                    messages = [
+                        {"role": "user", "content": "<cmd>cat untitled.txt</cmd>"}
+                    ]
+                else:
+                    messages = []
+                messages = messages + process_image_messages(prompt)
+
+        if vendor == "anthropic-steering-preview":
+            kwargs["extra_headers"] = {"anthropic-beta": "steering-2024-06-04"}
+            if "steering" in kwargs:
+                kwargs["extra_body"] = {"steering": kwargs["steering"]}
+                del kwargs["steering"]
+
+        response = await client.messages.create(
             model=model,
-            prompt=prompt or "\n\nHuman:",
-            max_tokens_to_sample=max_tokens or 16,
+            messages=messages,
+            max_tokens=max_tokens or 16,
             temperature=temperature or 1,
             top_p=top_p or 1,
-            # top_k=top_k or -1,
             stop_sequences=stop or list(),
-            disable_checks=True,
             **kwargs,
         )
-        if response["stop_reason"] == "stop_sequence":
+        if response.stop_reason == "stop_sequence":
             finish_reason = "stop"
-        elif response["stop_reason"] == "max_tokens":
+        elif response.stop_reason == "max_tokens":
             finish_reason = "length"
         else:
             finish_reason = "unknown"
@@ -308,7 +387,7 @@ async def complete(
                 "text": prompt,
             },
             "completions": [
-                {"text": response["completion"], "finish_reason": finish_reason}
+                {"text": response.content[0].text, "finish_reason": finish_reason}
             ],
             "model": model,
             "id": uuid.uuid4(),
@@ -356,76 +435,114 @@ async def complete(
         raise NotImplementedError(f"Unknown vendor {vendor}")
 
 
-SWITCH_ROLE_START = ["<|start_header_id|>", "<|im_start|>"]
-SWITCH_ROLE_END = ["<|end_header_id|>", "<|im_sep|>"]
-END_TURN = ["<|eot_id|>", "<|im_end|>"]
-SET_NAME_START = ["<|name_start|>"]
-SET_NAME_END = ["<|name_end|>"]
-ALL_DELIMITERS = (
-    SWITCH_ROLE_START + SWITCH_ROLE_END + END_TURN + SET_NAME_START + SET_NAME_END
-)
+def download_and_encode_image(url):
+    """Download image and convert to base64."""
+
+    import base64
+    import requests
+    from mimetypes import guess_type
+
+    response = requests.get(url)
+    response.raise_for_status()
+    image_data = response.content
+    mime_type = (
+        response.headers.get("content-type")
+        or guess_type(url)[0]
+        or "application/octet-stream"
+    )
+    return base64.b64encode(image_data).decode(), mime_type
 
 
-def split_many(string: str, delimiters: Iterable[str]) -> List[str]:
-    # Escape special regex characters and join delimiters with '|'
-    pattern = "(" + "|".join(re.escape(d) for d in delimiters) + ")"
-    # Split the string
-    result = re.split(pattern, string)
-    # Remove empty strings from the result
-    return [part.strip() for part in result if part.strip()]
+def process_image_message(content_string):
+    import requests
 
-
-def format_messages(
-    string: str, initial_role, initial_name=None, sticky_name=True
-) -> list:
-    role = initial_role
-    name = initial_name
-    substrings = split_many(string, ALL_DELIMITERS)
-    i = 0
-    messages = []
-    cur_message_content = ""
-    while i < len(substrings):
-        substring = substrings[i]
-        if substring in SWITCH_ROLE_START:
-            sofar = ""
-            j = i + 1
-            while j < len(substrings):
-                search = substrings[j]
-                if search in SWITCH_ROLE_END:
-                    role = sofar
-                    break
-                else:
-                    sofar += substrings[j]
-                j += 1
-            i = j
-        elif substring in SET_NAME_START:
-            sofar = ""
-            j = i + 1
-            while j < len(substrings):
-                search = substrings[j]
-                if search in SET_NAME_END:
-                    name = sofar
-                    break
-                else:
-                    sofar += substrings[j]
-                j += 1
-            i = j
-        elif substring in END_TURN:
-            message = {"content": cur_message_content, "role": role}
-            if name is not None:
-                message["name"] = name
-            messages.append(message)
-            if not sticky_name:
-                name = None
-            cur_message_content = ""
+    sections = re.split(r"<\|(?:begin|end)_of_img_url\|>", content_string)
+    if len(sections) == 1:
+        return content_string
+    content = []
+    for i, section in enumerate(sections):
+        if i % 2 == 0:
+            if section.strip():
+                content.append({"type": "text", "text": section})
         else:
-            cur_message_content += substring
-        i += 1
-    if cur_message_content != "":
-        message = {"content": cur_message_content, "role": role}
-        if name is not None:
-            message["name"] = name
-        messages.append(message)
+            try:
+                base64_data, mime_type = download_and_encode_image(section)
+                content.append(
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": mime_type,
+                            "data": base64_data,
+                        },
+                    }
+                )
+            except requests.RequestException:
+                continue
+    return content
+
+
+def process_image_messages(prompt: str, prompt_role: str = "assistant") -> list:
+    """Convert a prompt containing image URLs into a messages array.
+
+    Args:
+        prompt (str): The input prompt text with image URL markers
+        prompt_role (str): The role to use for text messages (default: "user")
+
+    Returns:
+        list: Array of message objects with text and images
+    """
+    import requests
+
+    messages = []
+    sections = re.split(r"<\|(?:begin|end)_of_img_url\|>", prompt)
+
+    # Constants
+    MAX_IMAGES = 10
+    total_images = (len(sections) - 1) // 2
+    images_to_process = min(total_images, MAX_IMAGES)
+    image_counter = 0
+
+    # Process each section
+    for i, section in enumerate(sections):
+        if i % 2 == 0:  # Text section
+            if section.strip():
+                messages.append({"role": prompt_role, "content": section})
+        else:  # Image URL section
+            image_counter += 1
+            if total_images - image_counter < images_to_process:
+                try:
+                    base64_data, mime_type = download_and_encode_image(section)
+                    image_content = {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": mime_type,
+                            "data": base64_data,
+                        },
+                    }
+
+                    # Add to last message if it exists, otherwise create new
+                    if messages and messages[-1]["role"] == "user":
+                        if isinstance(messages[-1]["content"], list):
+                            messages[-1]["content"].append(image_content)
+                        else:
+                            messages[-1]["content"] = [
+                                {"type": "text", "text": messages[-1]["content"]},
+                                image_content,
+                            ]
+                    else:
+                        messages.append({"role": "user", "content": [image_content]})
+                except requests.RequestException:
+                    continue  # Skip failed image downloads
+            else:
+                # Keep URL markers for images beyond processing limit
+                url_text = f"<|begin_of_img_url|>{section}<|end_of_img_url|>"
+                if messages and messages[-1]["role"] == prompt_role:
+                    messages[-1]["content"] += url_text
+                else:
+                    messages.append({"role": prompt_role, "content": url_text})
+
     return messages
 
 
