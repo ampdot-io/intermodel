@@ -435,6 +435,10 @@ async def complete(
         raise NotImplementedError(f"Unknown vendor {vendor}")
 
 
+def supports_images(model, custom_config=None):
+    return pick_vendor(model, custom_config) == "anthropic"
+
+
 def download_and_encode_image(url):
     """Download image and convert to base64."""
 
