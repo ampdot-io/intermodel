@@ -12,9 +12,15 @@ def get_hf_tokenizer(hf_name) -> "Tokenizer":
     else:
         from tokenizers import Tokenizer
 
-        hf_tokenizers[hf_name] = Tokenizer.from_pretrained(
-            hf_name, auth_token=get_hf_auth_token()
-        )  # log in with "huggingface-cli login"
+        try:
+            hf_tokenizers[hf_name] = Tokenizer.from_pretrained(
+                hf_name, token=get_hf_auth_token()
+            )  # log in with "huggingface-cli login"
+        except TypeError:
+            # Fall back to older `auth_token` for older versions of tokenizers
+            hf_tokenizers[hf_name] = Tokenizer.from_pretrained(
+                hf_name, auth_token=get_hf_auth_token()
+            )
         return hf_tokenizers[hf_name]
 
 

@@ -21,5 +21,5 @@ def test_tokenizer():
 
 def test_length():
     assert parse_model_string("davinci-002@12") == Model(
-        "davinci-002", "davinci-0022", 12
+        "davinci-002", "davinci-002", 12
     )
