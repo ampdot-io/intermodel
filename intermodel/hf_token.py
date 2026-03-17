@@ -13,7 +13,7 @@ def get_hf_tokenizer(hf_name) -> "Tokenizer":
         from tokenizers import Tokenizer
 
         hf_tokenizers[hf_name] = Tokenizer.from_pretrained(
-            hf_name, auth_token=get_hf_auth_token()
+            hf_name, token=get_hf_auth_token()
         )  # log in with "huggingface-cli login"
         return hf_tokenizers[hf_name]
 
