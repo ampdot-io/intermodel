@@ -1,6 +1,11 @@
 [project]
 name = "intermodel"
 version = "0.0.70"
+description = ""
+authors = [
+    { name = "Your Name", email = "you@example.com" }
+]
+readme = "README.md"
 dependencies = [
     "httpx",
     "anthropic>=0.3.1",
@@ -14,16 +19,12 @@ dependencies = [
     "aiohttp>=3.10.10",
 ]
 
-[tool.poetry]
-name = "intermodel"
-description = ""
-authors = ["Your Name <you@example.com>"]
-readme = "README.md"
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
-[tool.poetry.group.dev.dependencies]
-black = "*"
-
-[tool.rye]
-dev-dependencies = [
+[dependency-groups]
+dev = [
+    "black",
     "pytest>=8.3.3",
 ]
