@@ -1,6 +1,6 @@
 [project]
 name = "intermodel"
-version = "0.0.71"
+version = "0.0.72"
 dependencies = [
     "httpx",
     "anthropic>=0.3.1",
