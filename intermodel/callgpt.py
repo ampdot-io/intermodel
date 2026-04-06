@@ -778,13 +778,14 @@ def max_token_length_inner(model):
                 import json
 
                 data = json.load(f)
-            return data["max_position_embeddings"] + 1
+
+            return data.get("max_position_embeddings", data.get("model_max_length")) + 1
         except Exception as e:
             raise NotImplementedError(
                 f"Unable to download {model} from HuggingFace. "
                 f"Are you logged into HuggingFace (`rye run huggingface-cli login`) and have you agreed to the model"
                 f"license at `https://huggingface.co/{model}`?"
-            )
+            ) from e
 
 
 class InteractiveIntermodel(cmd.Cmd):
