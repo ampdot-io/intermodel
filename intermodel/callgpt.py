@@ -778,8 +778,11 @@ def max_token_length_inner(model):
                 import json
 
                 data = json.load(f)
-
-            return data.get("max_position_embeddings", data.get("model_max_length")) + 1
+            
+            if "text_config" in data:
+                return data["text_config"]["max_position_embeddings"] + 1
+            else:
+                return data["max_position_embeddings"] + 1
         except Exception as e:
             raise NotImplementedError(
                 f"Unable to download {model} from HuggingFace. "
